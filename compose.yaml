@@ -1,0 +1,33 @@
+services:
+  banksalad-calendar:
+    build:
+      context: https://github.com/GITHUB_USERNAME/banksalad-calendar.git#main
+    container_name: banksalad-calendar
+    restart: unless-stopped
+    environment:
+      # ─── 반드시 채워야 하는 값 2개 ───────────────────────
+      EXCEL_PASSWORD: "여기에_뱅샐_엑셀_비밀번호"
+      SERVICE_ACCOUNT_JSON_B64: "여기에_base64_한줄_붙여넣기"
+
+      # ─── 캘린더 (조회 완료, 수정 불필요) ─────────────────
+      CALENDAR_EXPENSE: "41b0be95dac20b349510c0f16f4150f4e93fdb8cf3f0225bed9b6613d7f4e0b4@group.calendar.google.com"
+      CALENDAR_INCOME: "10e017778a90cd86d548585d4515c715adb2592b1447dab9562c9abced0ecd9d@group.calendar.google.com"
+
+      # ─── 동작 설정 ───────────────────────────────────────
+      DRY_RUN: "true"               # 첫 실행은 true, 확인 후 false
+      MAX_AGE_DAYS: "90"            # 90일보다 오래된 거래 제외 (0 = 1년치 전부)
+      POLL_INTERVAL_SEC: "300"      # 5분마다 inbox 확인
+      INCLUDE_TRANSFERS: "false"    # 계좌간 이체 제외
+      MIN_AMOUNT: "1"               # 0원 거래 제외
+      EVENT_DURATION_MIN: "15"
+
+      # ─── 폴더 (이름으로 자동 탐색, 보통 수정 불필요) ─────
+      ROOT_FOLDER_NAME: "가계부"
+      INBOX_FOLDER_NAME: "inbox"
+      DONE_FOLDER_NAME: "done"
+      TIMEZONE: "Asia/Seoul"
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
