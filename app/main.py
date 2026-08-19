@@ -42,17 +42,18 @@ def process_file(drive: Drive, cal: Calendar, file: dict) -> None:
             log.error("파싱 실패 (%s): %s — inbox에 그대로 둡니다.", file["name"], err)
         return
 
-    stats = {"created": 0, "duplicate": 0, "failed": 0, "skipped": 0}
-    for txn in txns:
-        if not should_keep(txn):
-            stats["skipped"] += 1
-            continue
-        stats[cal.insert(txn)] += 1
+    kept = [t for t in txns if should_keep(t)]
+    skipped = len(txns) - len(kept)
+    summaries = parser.summarize(kept)
+
+    stats = {"created": 0, "updated": 0, "unchanged": 0, "failed": 0}
+    for summary in summaries:
+        stats[cal.upsert(summary)] += 1
 
     log.info(
-        "완료: %s — 총 %d건 중 신규 %d · 중복 %d · 제외 %d · 실패 %d",
-        file["name"], len(txns),
-        stats["created"], stats["duplicate"], stats["skipped"], stats["failed"],
+        "완료: %s — 거래 %d건(제외 %d) → 일정 %d개 · 신규 %d · 갱신 %d · 변동없음 %d · 실패 %d",
+        file["name"], len(txns), skipped, len(summaries),
+        stats["created"], stats["updated"], stats["unchanged"], stats["failed"],
     )
 
     _reported.discard(file["id"])
@@ -77,6 +78,13 @@ def main() -> None:
     drive = Drive()
     drive.resolve_folders()
     cal = Calendar()
+
+    if config.PURGE_ONCE:
+        cal.purge_all()
+        if not config.DRY_RUN:
+            restored = drive.restore_done_to_inbox()
+            if restored:
+                log.info("done → inbox %d개 복귀, 곧 다시 처리됩니다.", restored)
 
     log.info("감시 시작 (%d초 간격)", config.POLL_INTERVAL_SEC)
     while True:

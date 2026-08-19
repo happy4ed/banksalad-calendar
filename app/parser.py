@@ -144,6 +144,77 @@ class Txn:
         # Google event IDs allow base32hex chars (0-9, a-v); hex digits qualify.
         return "bs" + digest[:40]
 
+    @property
+    def line(self) -> str:
+        """집계 일정 설명란에 들어갈 한 줄."""
+        when = self.at.strftime("%H:%M") if self.at else "  —  "
+        name = self.merchant or self.minor or self.major or "거래"
+        head = f"{when}  {self.emoji} {self.amount:>10,}  {name}"
+        detail = " › ".join([p for p in (self.major, self.minor) if p])
+        tail_parts = [p for p in (detail, self.method) if p]
+        if self.memo:
+            tail_parts.append(f"“{self.memo}”")
+        if not tail_parts:
+            return head
+        return head + "\n" + " " * 9 + " · ".join(tail_parts)
+
+
+@dataclass
+class DailySummary:
+    """하루치 지출 또는 수입을 묶은 일정."""
+
+    day: date
+    kind: str  # "expense" | "income"
+    txns: list[Txn]
+
+    @property
+    def total(self) -> int:
+        return sum(t.amount for t in self.txns)
+
+    @property
+    def title(self) -> str:
+        emoji = "💰" if self.kind == "income" else "💳"
+        label = "수입" if self.kind == "income" else "지출"
+        return f"{emoji} {label} {self.total:,}원 ({len(self.txns)}건)"
+
+    @property
+    def description(self) -> str:
+        ordered = sorted(
+            self.txns, key=lambda t: (t.at is None, t.at or time(0, 0), -t.amount)
+        )
+        body = "\n".join(t.line for t in ordered)
+
+        by_category: dict[str, int] = {}
+        for t in self.txns:
+            key = t.major or t.minor or "기타"
+            by_category[key] = by_category.get(key, 0) + t.amount
+        ranked = sorted(by_category.items(), key=lambda kv: -kv[1])
+        summary = "\n".join(f"  {name}  {amount:,}원" for name, amount in ranked)
+
+        label = "수입" if self.kind == "income" else "지출"
+        return (
+            f"{body}\n\n"
+            f"── 분류별 ──\n{summary}\n\n"
+            f"{label} 합계  {self.total:,}원  ·  {len(self.txns)}건"
+        )
+
+    @property
+    def event_id(self) -> str:
+        raw = f"{self.day.isoformat()}|{self.kind}|daily"
+        digest = hashlib.sha256(raw.encode("utf-8")).hexdigest()
+        return "bsd" + digest[:40]
+
+
+def summarize(txns: list[Txn]) -> list[DailySummary]:
+    """거래 목록을 날짜별·지출수입별로 묶습니다. 빈 그룹은 만들지 않습니다."""
+    buckets: dict[tuple[date, str], list[Txn]] = {}
+    for t in txns:
+        buckets.setdefault((t.day, t.kind), []).append(t)
+    return [
+        DailySummary(day=day, kind=kind, txns=group)
+        for (day, kind), group in sorted(buckets.items(), key=lambda kv: kv[0])
+    ]
+
 
 XLSX_MARKERS = ("[Content_Types].xml", "xl/workbook.xml")
 SHEET_EXTS = (".xlsx", ".xlsm", ".xls")

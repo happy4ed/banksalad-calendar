@@ -58,3 +58,11 @@ def validate() -> None:
             missing.append(f"SERVICE_ACCOUNT_FILE (경로에 파일 없음: {SERVICE_ACCOUNT_FILE})")
     if missing:
         raise SystemExit("[config] 설정 누락: " + ", ".join(missing))
+
+# 시작할 때 이 앱이 만든 일정을 전부 지우고 시작합니다(1회성).
+# 정리가 끝나면 compose에서 다시 false로 되돌려 주세요.
+PURGE_ONCE = _env("PURGE_ONCE", "false").lower() == "true"
+
+# PURGE_ONCE가 켜졌을 때, 앱이 만들지 않은 일정까지 지울지 여부.
+# 기본값 false면 extendedProperties에 source=banksalad 표시가 붙은 것만 지웁니다.
+PURGE_ALL = _env("PURGE_ALL", "false").lower() == "true"

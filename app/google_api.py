@@ -114,6 +114,28 @@ class Drive:
             _, done = downloader.next_chunk()
         return buf.getvalue()
 
+    def restore_done_to_inbox(self) -> int:
+        """정리 후 재생성을 위해 done의 파일을 inbox로 되돌립니다."""
+        mimes = " or ".join(f"mimeType='{m}'" for m in SPREADSHEET_MIMES)
+        res = self.svc.files().list(
+            q=f"'{self.done_id}' in parents and trashed=false and ({mimes})",
+            fields="files(id,name)",
+            pageSize=100,
+            supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        files = res.get("files", [])
+        for file in files:
+            self.svc.files().update(
+                fileId=file["id"],
+                addParents=self.inbox_id,
+                removeParents=self.done_id,
+                fields="id",
+                supportsAllDrives=True,
+            ).execute()
+            log.info("재처리를 위해 inbox로 복귀: %s", file["name"])
+        return len(files)
+
     def move_to_done(self, file_id: str) -> None:
         meta = self.svc.files().get(
             fileId=file_id, fields="parents", supportsAllDrives=True
@@ -132,52 +154,113 @@ class Calendar:
     def __init__(self):
         self.svc = build("calendar", "v3", credentials=_credentials(), cache_discovery=False)
 
-    def insert(self, txn) -> str:
-        """Returns 'created', 'duplicate', or 'failed'."""
+    def purge(self, calendar_id: str, label: str) -> int:
+        """이 앱이 만든 일정을 지웁니다. 지운 개수를 반환합니다."""
+        deleted = 0
+        scanned = 0
+        page_token = None
+
+        while True:
+            params = {
+                "calendarId": calendar_id,
+                "maxResults": 250,
+                "singleEvents": True,
+                "showDeleted": False,
+                "fields": "nextPageToken,items(id,summary,extendedProperties)",
+            }
+            if page_token:
+                params["pageToken"] = page_token
+            if not config.PURGE_ALL:
+                params["privateExtendedProperty"] = "source=banksalad"
+
+            page = self.svc.events().list(**params).execute()
+            items = page.get("items", [])
+            scanned += len(items)
+
+            for event in items:
+                if config.DRY_RUN:
+                    deleted += 1
+                    continue
+                try:
+                    self.svc.events().delete(
+                        calendarId=calendar_id, eventId=event["id"]
+                    ).execute()
+                    deleted += 1
+                except HttpError as err:
+                    if err.resp.status in (404, 410):
+                        continue  # 이미 지워짐
+                    log.warning(
+                        "삭제 실패 (%s): %s", err.resp.status, event.get("summary", "?")
+                    )
+
+            page_token = page.get("nextPageToken")
+            if not page_token:
+                break
+            if config.DRY_RUN:
+                break  # DRY_RUN에서는 삭제하지 않으므로 무한 반복 방지
+
+        prefix = "[DRY_RUN] " if config.DRY_RUN else ""
+        log.info("%s%s 정리: %d건 조회 → %d건 삭제", prefix, label, scanned, deleted)
+        return deleted
+
+    def purge_all(self) -> None:
+        scope = "모든 일정" if config.PURGE_ALL else "이 앱이 만든 일정"
+        log.warning("PURGE_ONCE 활성화 — %s을 삭제합니다.", scope)
+        total = self.purge(config.CALENDAR_EXPENSE, "가계부-지출")
+        total += self.purge(config.CALENDAR_INCOME, "가계부-수입")
+        log.warning("정리 완료: 총 %d건", total)
+        if not config.DRY_RUN:
+            log.warning(
+                "compose에서 PURGE_ONCE를 false로 되돌린 뒤 재시작해 주세요. "
+                "그대로 두면 재시작할 때마다 일정이 지워집니다."
+            )
+
+    def upsert(self, summary) -> str:
+        """Returns 'created', 'updated', 'unchanged', or 'failed'."""
         calendar_id = (
-            config.CALENDAR_INCOME if txn.kind == "income" else config.CALENDAR_EXPENSE
+            config.CALENDAR_INCOME if summary.kind == "income" else config.CALENDAR_EXPENSE
         )
 
-        if txn.at:
-            start = f"{txn.day.isoformat()}T{txn.at.strftime('%H:%M:%S')}"
-            end_dt = (
-                txn.at.hour * 60 + txn.at.minute + config.EVENT_DURATION_MIN
-            )
-            end_h, end_m = divmod(end_dt, 60)
-            if end_h > 23:
-                end_h, end_m = 23, 59
-            when = {
-                "start": {"dateTime": start, "timeZone": config.TIMEZONE},
-                "end": {
-                    "dateTime": f"{txn.day.isoformat()}T{end_h:02d}:{end_m:02d}:00",
-                    "timeZone": config.TIMEZONE,
-                },
-            }
-        else:
-            when = {
-                "start": {"date": txn.day.isoformat()},
-                "end": {"date": (txn.day + timedelta(days=1)).isoformat()},
-            }
-
         body = {
-            "id": txn.event_id,
-            "summary": txn.title,
-            "description": txn.description,
+            "id": summary.event_id,
+            "summary": summary.title,
+            "description": summary.description,
             "transparency": "transparent",
             "reminders": {"useDefault": False},
             "extendedProperties": {"private": {"source": "banksalad"}},
-            **when,
+            "start": {"date": summary.day.isoformat()},
+            "end": {"date": (summary.day + timedelta(days=1)).isoformat()},
         }
 
         if config.DRY_RUN:
-            log.info("[DRY_RUN] %s | %s", txn.day, txn.title)
+            log.info("[DRY_RUN] %s | %s", summary.day, summary.title)
+            for line in summary.description.splitlines()[:3]:
+                log.info("[DRY_RUN]     %s", line)
             return "created"
 
         try:
             self.svc.events().insert(calendarId=calendar_id, body=body).execute()
             return "created"
         except HttpError as err:
-            if err.resp.status == 409:
-                return "duplicate"
-            log.warning("등록 실패 (%s): %s | %s", err.resp.status, txn.day, txn.title)
+            if err.resp.status != 409:
+                log.warning("등록 실패 (%s): %s | %s", err.resp.status, summary.day, summary.title)
+                return "failed"
+
+        # 이미 있는 날짜 — 내용이 달라졌을 때만 갱신합니다.
+        try:
+            existing = self.svc.events().get(
+                calendarId=calendar_id, eventId=summary.event_id
+            ).execute()
+            if (
+                existing.get("summary") == body["summary"]
+                and existing.get("description") == body["description"]
+                and existing.get("status") != "cancelled"
+            ):
+                return "unchanged"
+            self.svc.events().update(
+                calendarId=calendar_id, eventId=summary.event_id, body=body
+            ).execute()
+            return "updated"
+        except HttpError as err:
+            log.warning("갱신 실패 (%s): %s | %s", err.resp.status, summary.day, summary.title)
             return "failed"

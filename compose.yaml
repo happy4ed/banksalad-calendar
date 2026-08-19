@@ -14,12 +14,16 @@ services:
       CALENDAR_INCOME: "10e017778a90cd86d548585d4515c715adb2592b1447dab9562c9abced0ecd9d@group.calendar.google.com"
 
       # ─── 동작 설정 ───────────────────────────────────────
-      DRY_RUN: "true"               # 첫 실행은 true, 확인 후 false
+      # 기존 일정을 싹 지우고 새로 만들 때만 "true".
+      # 정리가 끝나면 반드시 "false"로 되돌리고 재시작하세요.
+      PURGE_ONCE: "true"
+      PURGE_ALL: "false"         # true면 이 앱이 안 만든 일정까지 삭제
+
+      DRY_RUN: "false"
       MAX_AGE_DAYS: "90"            # 90일보다 오래된 거래 제외 (0 = 1년치 전부)
       POLL_INTERVAL_SEC: "300"      # 5분마다 inbox 확인
       INCLUDE_TRANSFERS: "false"    # 계좌간 이체 제외
-      MIN_AMOUNT: "1"               # 0원 거래 제외
-      EVENT_DURATION_MIN: "15"
+      MIN_AMOUNT: "100"          # 100원 미만 제외 (1원 이자 등)
 
       # ─── 폴더 (이름으로 자동 탐색, 보통 수정 불필요) ─────
       ROOT_FOLDER_NAME: "가계부"
