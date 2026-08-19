@@ -25,6 +25,10 @@ def should_keep(txn) -> bool:
     return True
 
 
+# 같은 파일에 대해 같은 오류를 5분마다 반복 출력하지 않기 위한 기록
+_reported: set[str] = set()
+
+
 def process_file(drive: Drive, cal: Calendar, file: dict) -> None:
     log.info("처리 시작: %s", file["name"])
     raw = drive.download(file)
@@ -32,7 +36,10 @@ def process_file(drive: Drive, cal: Calendar, file: dict) -> None:
     try:
         txns = list(parser.parse(raw, config.EXCEL_PASSWORD))
     except Exception as err:
-        log.error("파싱 실패 (%s): %s — inbox에 그대로 둡니다.", file["name"], err)
+        key = f"{file['id']}:{err}"
+        if key not in _reported:
+            _reported.add(key)
+            log.error("파싱 실패 (%s): %s — inbox에 그대로 둡니다.", file["name"], err)
         return
 
     stats = {"created": 0, "duplicate": 0, "failed": 0, "skipped": 0}
@@ -47,6 +54,8 @@ def process_file(drive: Drive, cal: Calendar, file: dict) -> None:
         file["name"], len(txns),
         stats["created"], stats["duplicate"], stats["skipped"], stats["failed"],
     )
+
+    _reported.discard(file["id"])
 
     if stats["failed"] and not config.DRY_RUN:
         log.warning("실패 건이 있어 파일을 inbox에 남겨둡니다: %s", file["name"])

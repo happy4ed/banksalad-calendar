@@ -8,6 +8,7 @@ from typing import Iterator, Optional
 
 import msoffcrypto
 import openpyxl
+import pyzipper
 
 log = logging.getLogger("parser")
 
@@ -144,20 +145,75 @@ class Txn:
         return "bs" + digest[:40]
 
 
-def decrypt_if_needed(raw: bytes, password: str) -> bytes:
-    """뱅크샐러드는 비밀번호가 걸린 xlsx를 보냅니다. 안 걸려 있으면 그대로 반환."""
+XLSX_MARKERS = ("[Content_Types].xml", "xl/workbook.xml")
+SHEET_EXTS = (".xlsx", ".xlsm", ".xls")
+
+
+def _is_xlsx_container(names: list[str]) -> bool:
+    """xlsx 자체도 PK로 시작하는 zip이므로, 내부 구조로 구분합니다."""
+    return any(marker in names for marker in XLSX_MARKERS)
+
+
+def _unwrap_zip(raw: bytes, password: str, depth: int) -> bytes:
+    with pyzipper.AESZipFile(io.BytesIO(raw)) as zf:
+        names = zf.namelist()
+
+        if _is_xlsx_container(names):
+            return raw  # 이미 엑셀 파일
+
+        candidates = [
+            n for n in names
+            if n.lower().endswith(SHEET_EXTS) and not n.startswith("__MACOSX")
+        ]
+        if not candidates:
+            raise ValueError(
+                f"zip 안에 엑셀 파일이 없습니다. 내용물: {names[:10]}"
+            )
+        if len(candidates) > 1:
+            log.warning("zip 안에 엑셀이 %d개, 첫 번째만 사용합니다.", len(candidates))
+        target = candidates[0]
+        log.info("zip에서 추출: %s", target)
+
+        pwd = password.encode("utf-8") if password else None
+        try:
+            inner = zf.read(target, pwd=pwd)
+        except RuntimeError as err:
+            if "password" in str(err).lower():
+                raise ValueError(
+                    "zip 비밀번호가 틀렸거나 EXCEL_PASSWORD가 비어 있습니다."
+                ) from err
+            raise
+
+    return unwrap(inner, password, depth + 1)
+
+
+def unwrap(raw: bytes, password: str = "", depth: int = 0) -> bytes:
+    """zip 포장을 벗기고 엑셀 암호를 풀어 순수 xlsx 바이트를 반환합니다.
+
+    뱅크샐러드는 비밀번호가 걸린 zip 안에 엑셀을 담아 보냅니다.
+    포장 없이 xlsx만 오는 경우도 그대로 처리합니다.
+    """
+    if depth > 3:
+        raise ValueError("압축이 너무 여러 겹입니다.")
+
     if raw[:2] == b"PK":
-        return raw
+        return _unwrap_zip(raw, password, depth)
+
+    # OLE/CFB 헤더 = 비밀번호가 걸린 오피스 파일
     if not password:
-        raise ValueError(
-            "암호화된 엑셀인데 EXCEL_PASSWORD가 비어 있습니다."
-        )
-    buf = io.BytesIO(raw)
+        raise ValueError("암호화된 엑셀인데 EXCEL_PASSWORD가 비어 있습니다.")
     out = io.BytesIO()
-    office = msoffcrypto.OfficeFile(buf)
-    office.load_key(password=password)
-    office.decrypt(out)
-    return out.getvalue()
+    office = msoffcrypto.OfficeFile(io.BytesIO(raw))
+    try:
+        office.load_key(password=password)
+        office.decrypt(out)
+    except Exception as err:
+        raise ValueError(f"엑셀 비밀번호 해제 실패: {err}") from err
+    return unwrap(out.getvalue(), password, depth + 1)
+
+
+# 하위 호환용 별칭
+decrypt_if_needed = unwrap
 
 
 def _pick_sheet(wb) -> "openpyxl.worksheet.worksheet.Worksheet":
@@ -259,7 +315,7 @@ def _classify(kind_text: str, amount_raw) -> str:
 
 
 def parse(raw: bytes, password: str = "") -> Iterator[Txn]:
-    data = decrypt_if_needed(raw, password)
+    data = unwrap(raw, password)
     wb = openpyxl.load_workbook(io.BytesIO(data), data_only=True, read_only=True)
     try:
         ws = _pick_sheet(wb)

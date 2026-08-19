@@ -19,6 +19,10 @@ SPREADSHEET_MIMES = (
     "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
     "application/vnd.ms-excel",
     "application/vnd.google-apps.spreadsheet",
+    # 뱅크샐러드는 비밀번호가 걸린 zip으로 보냅니다.
+    "application/zip",
+    "application/x-zip-compressed",
+    "application/octet-stream",
 )
 
 
